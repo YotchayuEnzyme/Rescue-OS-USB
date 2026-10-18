@@ -1,0 +1,16 @@
+1. ภาษาที่ใช้ในการพัฒนาโปรเจกต์นี้ (Programming & Configuration Languages)
+ในงานสาย System Engineering และ OS Customization เราไม่ได้ใช้ภาษาคอมไพล์อย่าง C++ หรือ Python เป็นหลัก แต่จะใช้ ภาษาสคริปต์ระดับระบบ (System Scripting) เพื่อควบคุมเคอร์เนลและฮาร์ดแวร์โดยตรง ดังนี้ครับ:
+
+POSIX Shell Script (sh / Ash):
+
+บทบาทในโปรเจกต์: เป็นภาษาหลักที่ใช้เขียนคำสั่งควบคุมระบบทั้งหมด รวมถึงสคริปต์อัตโนมัติอย่าง auto-mount.sh
+
+จุดเด่นทางวิศวกรรม: Alpine Linux ใช้ BusyBox Ash (Almquist Shell) ซึ่งอิงตามมาตรฐาน POSIX sh แท้ๆ แทนการใช้ bash แบบใน Ubuntu เนื่องจากมีขนาดเล็กมาก กินหน่วยความจำระดับกิโลไบต์ และรันบน RAM ได้รวดเร็วที่สุด
+
+Declarative Configuration & System Directives:
+
+บทบาทในโปรเจกต์: การเขียนตั้งค่าผ่านไฟล์คอนฟิกของระบบ (เช่น /etc/resolv.conf, /etc/ssh/sshd_config, /etc/apk/repositories, และ /root/.xinitrc) เพื่อกำหนดพฤติกรรมของเซอร์วิสและหน้าต่างกราฟิกตอนบูตเครื่อง
+
+Regular Expressions (Regex) บน sed (Stream Editor):
+
+บทบาทในโปรเจกต์: ใช้เขียนคำสั่งแก้ไขข้อความในไฟล์ระบบแบบอัตโนมัติโดยไม่ต้องเปิด Text Editor เช่น คำสั่ง sed -i 's/^#\(.*\/community\)/\1/' /etc/apk/repositories เพื่อค้นหาและลบเครื่องหมาย # หน้าคลังแพ็กเกจ

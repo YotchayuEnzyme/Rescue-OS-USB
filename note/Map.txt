@@ -1,0 +1,21 @@
+# 📌 Rescue-OS Lab Note & Progress Checkpoint
+
+### 1. สิ่งที่ทำเสร็จแล้ว (Completed)
+- แบ่งพาร์ทิชันบนดิสก์คนไข้ `/dev/sda`:
+  - `sda1`: EFI / Boot (vfat)
+  - `sda2`: Data Partition (ext4) มีไฟล์ทดสอบ `important_file.txt` อยู่ข้างใน
+- เข้าใจกลไกความปลอดภัย:
+  - `mount -o ro`: เมานต์แบบ Read-Only ป้องกันการเขียนทับระดับระบบไฟล์
+  - `blockdev --setro` / `--setrw`: ควบคุมล็อกสิทธิ์ระดับฮาร์ดแวร์/เคอร์เนล
+  - การอ่านไฟล์ใช้ `cat`, การตรวจสอบดิสก์ใช้ `lsblk`
+
+### 2. สถานะปัจจุบัน (Current State)
+- รันบนระบบ Live ISO (Alpine)
+- ปลดเมานต์ `/mnt/patient` เรียบร้อยแล้ว (`umount`)
+
+### 3. จุดที่จะทำต่อทันทีเมื่อกลับมา (Next Steps)
+1. เขียนสคริปต์สแกนและเมานต์อัตโนมัติแบบ Read-Only (`rescue_mount.sh`)
+2. ออกแบบระบบเมนูตัวเลือก (Interactive Triage):
+   - [Option 1] Safe Backup (ดึงข้อมูลอย่างเดียว - Read-Only)
+   - [Option 2] File Carving (กู้ไฟล์ที่ถูกลบด้วยเครื่องมือสแกน Raw Bytes)
+   - [Option 3] System Repair (ซ่อมแซมระบบบูต/ระบบไฟล์ - Read-Write)

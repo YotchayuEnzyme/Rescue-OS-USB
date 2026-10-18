@@ -67,3 +67,18 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# VirtualBox & VM Images
+*.vdi
+*.vmdk
+*.vhd
+*.vhdx
+VHD/
+
+# OS ISO Images
+*.iso
+Alpine/
+
+# VirtualBox Machine State
+*.vbox
+*.vbox-prev
