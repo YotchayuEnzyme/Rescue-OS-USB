@@ -1,0 +1,291 @@
+#!/bin/sh
+>
+> while true; do
+>     CHOICE=$(zenity --list \
+           zenity --warning --title="ไม่พบดิสก์" --text="ตรวจไม่พบพาร์ทิชันข้อมูลเป้าหมาย กรุณาตรวจสอบสายเชื่อมต่อ USB" --width=350
+            else
+                PART_LIST=""
+              >         --title="🛡️ ระบบกู้ภัยฉุกเฉิน (Rescue-OS)" \
+       LABEL=$(lsblk -dn -o LABEL "/dev/$PART" | sed 's/ /_/g')
+                    [ -z "$LABEL>         --text="ยินดีต้อนรับ! กรุณาเลือกสิ่งที่ต้องการดำเนินการ:" \
+>         --column="รหัส" --column="รายการคำสั่ง" \
+>         "1" "📁 เปิดดึงไฟล์งานแบบปลอดภัย (Safe Read-Only)" \
+TH/Windows" ] && [ -d "$CHECK_PATH/Users" ]); then
+                            ROLE="🪟_ระบบ_Windows_(Drive_C:)"
+                        elif [ -d "$CHECK_PATH/EFI" ] || [ -d "$CHECK_PATH/Boot" ]; then
+      >         "2" "❤️ ตรวจเช็กสุขภาพฮาร์ดดิสก์ (S.M.A.R.T. Check)" \
+>         "3" "🦠 สแกนไวรัสในไดรฟ์ (Offline Antivirus)" \
+>         "4" "🛠️ เข้าสู่โหมดผู้เชี่ยวชาญ (เปิดหน้าจอ Desktop / Terminal)" \
+>         "5" "🔴 ปิดเครื่อง (Shutdown)" \
+>         --width=550 --height=350 --cancel-label="ออก")
+>
+>     case $CHOICE in
+>         "1")
+>             # ดึงรายชื่อพาร์ทิชันเป้าหมายเบื้องต้น
+>             RAW_PARTS=$(lsblk -ln -o NAME,FSTYPE | grep -v '^sda' | awk '/ntfs|vfat|exfat|ext4|ext3|xfs|btrfs/ {print
+$1}')
+>
+>             if [ -z "$RAW_PARTS" ]; then
+>                 zenity --warning --title="ไม่พบดิสก์" --text="ตรวจไม่พบพาร์ทิชันข้อมูลเป้าหมาย กรุณาตรวจสอบสายเชื่อมต่อ USB" --width
+=350
+>             else
+>                 PART_LIST=""
+>                 PROBE_DIR="/tmp/rescue_probe"
+>                 mkdir -p "$PROBE_DIR"
+                done
+                rmdir "$PROBE_DIR" 2>/dev/null
+
+                # แสดงตาราง>
+>                 # วนลูปตรวจสอบแต่ละพาร์ทิชันเพื่อจำแนกประเภท (Drive C vs Data)
+>                 for PART in $RAW_PARTS; do
+>                     SIZE=$(lsblk -dn -o SIZE "/dev/$PART" | tr -d '[:space:]')
+>                     FSTYPE=$(lsblk -dn -o FSTYPE "/dev/$PART" | tr -d '[:space:]')
+>                     LABEL=$(lsblk -dn -o LABEL "/dev/$PART" | sed 's/ /_/g')
+>                     [ -z "$LABEL" ] && LABEL="[ไม่มีชื่อ]"
+>
+>                     ROLE="📁_ไดรฟ์ข้อมูลทั่วไป_(Data/D:)"
+>                     USED="ไม่ทราบ"
+>
+>                     # เช็กว่าพาร์ทิชันถูกเมาท์อยู่แล้วหรือไม่
+>                     EXISTING_MNT=$(lsblk -dn -o MOUNTPOINT "/dev/$PART")
+>                     if [ -n "$EXISTING_MNT" ]; then
+>                         CHECK_PATH="$EXISTING_MNT"
+>                         CLEANUP=0
+ัตโนมัติ)" --column="ชื่อป้าย (LABEL)" \
+                    $PART_LIST)
+
+                # เมื่>                     else
+>                         # แอบเมาท์ชั่วคราวแบบ Read-Only เพื่อส่องดูโฟลเดอร์ข้างใน
+>                         if mount -o ro,noexec,nosuid,nodev "/dev/$PART" "$PROBE_DIR" 2>/dev/null; then
+>                             CHECK_PATH="$PROBE_DIR"
+>                             CLEANUP=1
+>                         else
+>                             CHECK_PATH=""
+>                             CLEANUP=0
+>                         fi
+>                     fi
+>
+>                     # วิเคราะห์โครงสร้างโฟลเดอร์เพื่อระบุประเภทไดรฟ์
+>                     if [ -n "$CHECK_PATH" ]; then
+>                         USED=$(df -h "$CHECK_PATH" 2>/dev/null | awk 'NR==2 {print $3}')
+>                         [ -z "$USED" ] && USED="N/A"
+>
+>                         if [ -d "$CHECK_PATH/Windows/System32" ] || ([ -d "$CHECK_PATH/Windows" ] && [ -d "$CHECK_PATH
+/Users" ]); then
+>                             ROLE="🪟_ระบบ_Windows_(Drive_C:)"
+>                         elif [ -d "$CHECK_PATH/EFI" ] || [ -d "$CHECK_PATH/Boot" ]; then
+>                             ROLE="⚙️_พาร์ทิชันบูตระบบ_(System)"
+>                         elif [ -d "$CHECK_PATH/etc" ] && [ -d "$CHECK_PATH/usr" ]; then
+>                             ROLE="🐧_ระบบ_Linux_(Root)"
+>                         elif [ -d "$CHECK_PATH/Users" ] || [ -d "$CHECK_PATH/Documents and Settings" ]; then
+>                             ROLE="👤_โฟลเดอร์ผู้ใช้_(Users)"
+>                         fi
+>
+>                         [ "$CLEANUP" -eq 1 ] && umount "$PROBE_DIR" 2>/dev/null
+>                     else
+>                         ROLE="🔒_ติดล็อก/รอซ่อมแซม_(กดเพื่อปลดล็อก)"
+>                     fi
+>
+>                     PART_LIST="$PART_LIST $PART $SIZE $USED $ROLE $LABEL"
+>                 done
+>                 rmdir "$PROBE_DIR" 2>/dev/null
+          else
+                zenity --warning --title="ไม่พบดิสก์" --text="ตรวจไม่พบฮาร์ดดิสก์เป้าหมายสำหรับเช็ก S.M.A.R.T." --width=350
+            fi
+            ;;
+        "3")
+          >
+>                 # แสดงตาราง UI โฉมใหม่ที่บอกชัดเจนว่าอันไหน Drive C หรือ Drive D
+>                 SELECTED_PART=$(zenity --list \
+>                     --title="Rescue-OS : เลือกไดรฟ์เป้าหมาย" \
+>                     --text="ระบบวิเคราะห์โครงสร้างไดรฟ์เสร็จสิ้น กรุณาคลิกเลือกพาร์ทิชันที่ต้องการกู้ข้อมูล:" \
+>                     --width=700 --height=320 \
+>                     --column="พาร์ทิชัน" --column="ขนาดรวม" --column="ใช้ไป" --column="ประเภทที่ตรวจพบ (แยกอัตโนมัติ)" --column
+="ชื่อป้าย (LABEL)" \
+>                     $PART_LIST)
+>
+>                 # เมื่อผู้ใช้กดเลือกและกด OK
+>                 if [ -n "$SELECTED_PART" ]; then
+>                     MOUNT_DIR="/mnt/rescue_$SELECTED_PART"
+>                     mkdir -p "$MOUNT_DIR"
+>
+>                     umount "/dev/$SELECTED_PART" 2>/dev/null
+>
+>                     FSTYPE=$(lsblk -no FSTYPE "/dev/$SELECTED_PART" | head -n 1 | tr -d '[:space:]')
+>                     if [ "$FSTYPE" = "ntfs" ]; then
+>                         ntfsfix -d "/dev/$SELECTED_PART" >/dev/null 2>&1
+>                     fi
+>
+>                     if mountpoint -q "$MOUNT_DIR" || mount -o ro,noexec,nosuid,nodev "/dev/$SELECTED_PART" "$MOUNT_DIR
+" 2>/dev/null; then
+>                         zenity --info --title="Safe Mount สำเร็จ" --text="เชื่อมต่อ /dev/$SELECTED_PART แบบ Read-Only ปลอด
+เชื้อเรียบร้อยแล้ว\nกำลังเปิดหน้าต่างโฟลเดอร์..." --width=400
+>                         thunar "$MOUNT_DIR" &
+>                     else
+>                         zenity --error --title="ข้อผิดพลาด" --text="ไม่สามารถเชื่อมต่อ /dev/$SELECTED_PART ได้\n(พาร์ทิชันอาจเสีย
+หายหนัก หรือติดการเข้ารหัส BitLocker)" --width=400
+>                     fi
+>                 fi
+>             fi
+>             ;;
+>         "2")
+>             TARGET=$(lsblk -d -npo NAME,TYPE | awk '$2=="disk" && $1!~"/dev/sda" {print $1; exit}')
+>             if [ -n "$TARGET" ]; then
+>                 HEALTH=$(smartctl -H "$TARGET" 2>&1)
+>                 echo "$HEALTH" | zenity --text-info --title="ผลการตรวจสุขภาพดิสก์ ($TARGET)" --width=600 --height=400 --e
+ditable=FALSE
+>             else
+>                 zenity --warning --title="ไม่พบดิสก์" --text="ตรวจไม่พบฮาร์ดดิสก์เป้าหมายสำหรับเช็ก S.M.A.R.T." --width=350
+>             fi
+>             ;;
+>         "3")
+>             zenity --info --title="Antivirus" --text="ระบบเตรียมพร้อมสำหรับการสแกนไวรัส (ClamAV)" --width=300
+>             ;;
+>         "4"|"")
+>             break
+>             ;;
+>         "5")
+>             poweroff
+>             break
+>             ;;
+>     esac
+> done
+> EOF
+localhost:~# chmod +x /root/Desktop/Rescue-Drive.sh
+localhost:~# lbu commit sda1
+tar: root/.gnupg/S.gpg-agent.ssh: socket ignored
+tar: root/.gnupg/S.gpg-agent.browser: socket ignored
+tar: root/.gnupg/S.gpg-agent.extra: socket ignored
+tar: root/.gnupg/S.gpg-agent: socket ignored
+tar: root/.ssh/agent/s.ty5jXgL98F.agent.iquUCxQ9F1: socket ignored
+tar: root/.cache/keyring-2QRMX3/control: socket ignored
+tar: root/.cache/at-spi/bus_0: socket ignored
+localhost:~# ^C
+
+localhost:~# cat /root/Desktop/Rescue-Drive.sh
+#!/bin/sh
+
+while true; do
+    CHOICE=$(zenity --list \
+        --title="🛡️ ระบบกู้ภัยฉุกเฉิน (Rescue-OS)" \
+        --text="ยินดีต้อนรับ! กรุณาเลือกสิ่งที่ต้องการดำเนินการ:" \
+        --column="รหัส" --column="รายการคำสั่ง" \
+        "1" "📁 เปิดดึงไฟล์งานแบบปลอดภัย (Safe Read-Only)" \
+        "2" "❤️ ตรวจเช็กสุขภาพฮาร์ดดิสก์ (S.M.A.R.T. Check)" \
+        "3" "🦠 สแกนไวรัสในไดรฟ์ (Offline Antivirus)" \
+        "4" "🛠️ เข้าสู่โหมดผู้เชี่ยวชาญ (เปิดหน้าจอ Desktop / Terminal)" \
+        "5" "🔴 ปิดเครื่อง (Shutdown)" \
+        --width=550 --height=350 --cancel-label="ออก")
+
+    case $CHOICE in
+        "1")
+            # ดึงรายชื่อพาร์ทิชันเป้าหมายเบื้องต้น
+            RAW_PARTS=$(lsblk -ln -o NAME,FSTYPE | grep -v '^sda' | awk '/ntfs|vfat|exfat|ext4|ext3|xfs|btrfs/ {print $1}')
+
+            if [ -z "$RAW_PARTS" ]; then
+                zenity --warning --title="ไม่พบดิสก์" --text="ตรวจไม่พบพาร์ทิชันข้อมูลเป้าหมาย กรุณาตรวจสอบสายเชื่อมต่อ USB" --width=350
+            else
+                PART_LIST=""
+                PROBE_DIR="/tmp/rescue_probe"
+                mkdir -p "$PROBE_DIR"
+
+                # วนลูปตรวจสอบแต่ละพาร์ทิชันเพื่อจำแนกประเภท (Drive C vs Data)
+                for PART in $RAW_PARTS; do
+                    SIZE=$(lsblk -dn -o SIZE "/dev/$PART" | tr -d '[:space:]')
+                    FSTYPE=$(lsblk -dn -o FSTYPE "/dev/$PART" | tr -d '[:space:]')
+                    LABEL=$(lsblk -dn -o LABEL "/dev/$PART" | sed 's/ /_/g')
+                    [ -z "$LABEL" ] && LABEL="[ไม่มีชื่อ]"
+
+                    ROLE="📁_ไดรฟ์ข้อมูลทั่วไป_(Data/D:)"
+                    USED="ไม่ทราบ"
+
+                    # เช็กว่าพาร์ทิชันถูกเมาท์อยู่แล้วหรือไม่
+                    EXISTING_MNT=$(lsblk -dn -o MOUNTPOINT "/dev/$PART")
+                    if [ -n "$EXISTING_MNT" ]; then
+                        CHECK_PATH="$EXISTING_MNT"
+                        CLEANUP=0
+                    else
+                        # แอบเมาท์ชั่วคราวแบบ Read-Only เพื่อส่องดูโฟลเดอร์ข้างใน
+                        if mount -o ro,noexec,nosuid,nodev "/dev/$PART" "$PROBE_DIR" 2>/dev/null; then
+                            CHECK_PATH="$PROBE_DIR"
+                            CLEANUP=1
+                        else
+                            CHECK_PATH=""
+                            CLEANUP=0
+                        fi
+                    fi
+
+                    # วิเคราะห์โครงสร้างโฟลเดอร์เพื่อระบุประเภทไดรฟ์
+                    if [ -n "$CHECK_PATH" ]; then
+                        USED=$(df -h "$CHECK_PATH" 2>/dev/null | awk 'NR==2 {print $3}')
+                        [ -z "$USED" ] && USED="N/A"
+
+                        if [ -d "$CHECK_PATH/Windows/System32" ] || ([ -d "$CHECK_PATH/Windows" ] && [ -d "$CHECK_PATH/Users" ]); then
+                            ROLE="🪟_ระบบ_Windows_(Drive_C:)"
+                        elif [ -d "$CHECK_PATH/EFI" ] || [ -d "$CHECK_PATH/Boot" ]; then
+                            ROLE="⚙️_พาร์ทิชันบูตระบบ_(System)"
+                        elif [ -d "$CHECK_PATH/etc" ] && [ -d "$CHECK_PATH/usr" ]; then
+                            ROLE="🐧_ระบบ_Linux_(Root)"
+                        elif [ -d "$CHECK_PATH/Users" ] || [ -d "$CHECK_PATH/Documents and Settings" ]; then
+                            ROLE="👤_โฟลเดอร์ผู้ใช้_(Users)"
+                        fi
+
+                        [ "$CLEANUP" -eq 1 ] && umount "$PROBE_DIR" 2>/dev/null
+                    else
+                        ROLE="🔒_ติดล็อก/รอซ่อมแซม_(กดเพื่อปลดล็อก)"
+                    fi
+
+                    PART_LIST="$PART_LIST $PART $SIZE $USED $ROLE $LABEL"
+                done
+                rmdir "$PROBE_DIR" 2>/dev/null
+
+                # แสดงตาราง UI โฉมใหม่ที่บอกชัดเจนว่าอันไหน Drive C หรือ Drive D
+                SELECTED_PART=$(zenity --list \
+                    --title="Rescue-OS : เลือกไดรฟ์เป้าหมาย" \
+                    --text="ระบบวิเคราะห์โครงสร้างไดรฟ์เสร็จสิ้น กรุณาคลิกเลือกพาร์ทิชันที่ต้องการกู้ข้อมูล:" \
+                    --width=700 --height=320 \
+                    --column="พาร์ทิชัน" --column="ขนาดรวม" --column="ใช้ไป" --column="ประเภทที่ตรวจพบ (แยกอัตโนมัติ)" --column="ชื่อป้าย (LABEL)" \
+                    $PART_LIST)
+
+                # เมื่อผู้ใช้กดเลือกและกด OK
+                if [ -n "$SELECTED_PART" ]; then
+                    MOUNT_DIR="/mnt/rescue_$SELECTED_PART"
+                    mkdir -p "$MOUNT_DIR"
+
+                    umount "/dev/$SELECTED_PART" 2>/dev/null
+
+                    FSTYPE=$(lsblk -no FSTYPE "/dev/$SELECTED_PART" | head -n 1 | tr -d '[:space:]')
+                    if [ "$FSTYPE" = "ntfs" ]; then
+                        ntfsfix -d "/dev/$SELECTED_PART" >/dev/null 2>&1
+                    fi
+
+                    if mountpoint -q "$MOUNT_DIR" || mount -o ro,noexec,nosuid,nodev "/dev/$SELECTED_PART" "$MOUNT_DIR" 2>/dev/null; then
+                        zenity --info --title="Safe Mount สำเร็จ" --text="เชื่อมต่อ /dev/$SELECTED_PART แบบ Read-Only ปลอดเชื้อเรียบร้อยแล้ว\nกำลังเปิดหน้าต่างโฟลเดอร์..." --width=400
+                        thunar "$MOUNT_DIR" &
+                    else
+                        zenity --error --title="ข้อผิดพลาด" --text="ไม่สามารถเชื่อมต่อ /dev/$SELECTED_PART ได้\n(พาร์ทิชันอาจเสียหายหนัก หรือติดการเข้ารหัส BitLocker)" --width=400
+                    fi
+                fi
+            fi
+            ;;
+        "2")
+            TARGET=$(lsblk -d -npo NAME,TYPE | awk '$2=="disk" && $1!~"/dev/sda" {print $1; exit}')
+            if [ -n "$TARGET" ]; then
+                HEALTH=$(smartctl -H "$TARGET" 2>&1)
+                echo "$HEALTH" | zenity --text-info --title="ผลการตรวจสุขภาพดิสก์ ($TARGET)" --width=600 --height=400 --editable=FALSE
+            else
+                zenity --warning --title="ไม่พบดิสก์" --text="ตรวจไม่พบฮาร์ดดิสก์เป้าหมายสำหรับเช็ก S.M.A.R.T." --width=350
+            fi
+            ;;
+        "3")
+            zenity --info --title="Antivirus" --text="ระบบเตรียมพร้อมสำหรับการสแกนไวรัส (ClamAV)" --width=300
+            ;;
+        "4"|"")
+            break
+            ;;
+        "5")
+            poweroff
+            break
+            ;;
+    esac
+done

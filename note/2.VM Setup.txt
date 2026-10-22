@@ -51,3 +51,6 @@ sed -i 's/^#\(.*\/community\)/\1/' /etc/apk/repositories
 
 # 3. อัปเดตรายการแพ็กเกจทั้งหมดในระบบให้เป็นเวอร์ชันล่าสุด
 apk update
+
+# 4.เช็คไฟล์ใน drive ที่เห็น
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT

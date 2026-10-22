@@ -1,4 +1,4 @@
-1. ภาษาที่ใช้ในการพัฒนาโปรเจกต์นี้ (Programming & Configuration Languages)
+ภาษาที่ใช้ในการพัฒนาโปรเจกต์นี้ (Programming & Configuration Languages)
 ในงานสาย System Engineering และ OS Customization เราไม่ได้ใช้ภาษาคอมไพล์อย่าง C++ หรือ Python เป็นหลัก แต่จะใช้ ภาษาสคริปต์ระดับระบบ (System Scripting) เพื่อควบคุมเคอร์เนลและฮาร์ดแวร์โดยตรง ดังนี้ครับ:
 
 POSIX Shell Script (sh / Ash):
