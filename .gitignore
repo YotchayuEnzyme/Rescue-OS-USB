@@ -23,7 +23,6 @@
 *.dll
 *.so.*
 
-
 # Fortran module files
 *.mod
 *.smod
@@ -74,6 +73,7 @@ Testing/
 *.vhd
 *.vhdx
 VHD/
+disktest/
 
 # OS ISO Images
 *.iso

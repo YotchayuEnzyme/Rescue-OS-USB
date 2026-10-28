@@ -1,0 +1,828 @@
+#!/bin/ash
+# Rescue-OS : Rescue-Drive.sh
+# Alpine Linux / BusyBox ash
+#
+# File recovery only:
+# - Select source first; do not probe every disk automatically.
+# - Set kernel block-device RO before mounting the selected source.
+# - Never repair the original filesystem automatically.
+# - Fail closed when source protection or mount verification fails.
+#
+# Tested filesystem handlers configured here: NTFS, ext4.
+# Encrypted containers: LUKS, BitLocker (requires cryptsetup support).
+#
+# IMPORTANT:
+# Kernel RO is not a hardware write blocker.
+# Test in a VM before using with important physical media.
+
+LOG=/tmp/rescue.log
+PROBE_DIR=/tmp/rescue_probe
+MNT_BASE=/mnt
+MAPPER_DIR=/dev/mapper
+RO_OPTS="ro,noexec,nosuid,nodev"
+
+TESTED_FS="ntfs ext4"
+TESTED_ENC="crypto_LUKS BitLocker"
+PROTECT_TYPES="disk"
+
+mkdir -p /tmp "$MNT_BASE"
+touch "$LOG"
+
+log() {
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"
+}
+
+show_error() {
+    zenity --error --title="${1:-Rescue-OS}" \
+        --width=480 --text="$2"
+}
+
+# ---------------------------------------------------------------
+# Device / mount utilities
+# ---------------------------------------------------------------
+
+get_fstype() {
+    lsblk -dn -o FSTYPE "$1" 2>/dev/null |
+        tr -d '[:space:]'
+}
+
+get_mountpoint() {
+    awk -v d="$1" '$1==d {print $2; exit}' /proc/mounts
+}
+
+get_mount_source() {
+    awk -v m="$1" '$2==m {print $1; exit}' /proc/mounts
+}
+
+get_mount_opts() {
+    awk -v m="$1" '$2==m {print $4; exit}' /proc/mounts
+}
+
+is_ro_mount() {
+    IM_OPTS=$(get_mount_opts "$1")
+    case ",$IM_OPTS," in
+        *,ro,*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+same_dev() {
+    SD_A=$(readlink -f "$1" 2>/dev/null)
+    SD_B=$(readlink -f "$2" 2>/dev/null)
+
+    [ -n "$SD_A" ] && [ -n "$SD_B" ] &&
+        [ "$SD_A" = "$SD_B" ]
+}
+
+dev_is_ro() {
+    DR_PATH=$(readlink -f "$1" 2>/dev/null)
+    DR_NAME=${DR_PATH##*/}
+
+    if [ -n "$DR_NAME" ] &&
+       [ -r "/sys/class/block/$DR_NAME/ro" ]; then
+        [ "$(cat "/sys/class/block/$DR_NAME/ro" 2>/dev/null)" = "1" ]
+    elif command -v blockdev >/dev/null 2>&1; then
+        [ "$(blockdev --getro "$1" 2>/dev/null)" = "1" ]
+    else
+        return 1
+    fi
+}
+
+fs_is_tested() {
+    case " $TESTED_FS " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+enc_is_tested() {
+    case " $TESTED_ENC " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+probe_cleanup() {
+    if mountpoint -q "$PROBE_DIR" 2>/dev/null; then
+        umount "$PROBE_DIR" >> "$LOG" 2>&1 || return 1
+    fi
+
+    ! mountpoint -q "$PROBE_DIR" 2>/dev/null
+}
+
+# ---------------------------------------------------------------
+# Identify system / boot media (best effort only)
+# ---------------------------------------------------------------
+
+get_sys_disks() {
+    {
+        # Alpine local backup media configuration.
+        sed -n 's/^LBU_MEDIA=//p' /etc/lbu/lbu.conf 2>/dev/null
+
+        # Mounted media and current root / boot devices.
+        awk '$2 ~ "^/media/" || $2=="/" ||
+             $2=="/boot" || $2=="/boot/efi" {print $1}' /proc/mounts
+    } |
+    while read -r DEV; do
+        DEV=${DEV#/dev/}
+
+        case "$DEV" in
+            ""|UUID=*|LABEL=*|PARTUUID=*|PARTLABEL=*|overlay|tmpfs|rootfs)
+                continue
+                ;;
+        esac
+
+        [ -b "/dev/$DEV" ] || continue
+
+        PARENT=$(lsblk -dn -o PKNAME "/dev/$DEV" 2>/dev/null |
+            tr -d '[:space:]')
+
+        if [ -n "$PARENT" ]; then
+            echo "$PARENT"
+        else
+            echo "$DEV"
+        fi
+    done | sort -u
+}
+
+is_sys_part() {
+    ISP_PARENT=$(lsblk -dn -o PKNAME "/dev/$1" 2>/dev/null |
+        tr -d '[:space:]')
+
+    [ -n "$ISP_PARENT" ] || ISP_PARENT=$1
+
+    printf '%s\n' "$SYS_DISKS" | grep -qx "$ISP_PARENT"
+}
+
+dev_in_swap() {
+    while read -r SW _; do
+        [ "$SW" = "Filename" ] && continue
+        [ -n "$SW" ] || continue
+
+        same_dev "$SW" "/dev/$1" && return 0
+    done < /proc/swaps
+
+    return 1
+}
+
+dev_foreign_holders() {
+    for H in /sys/class/block/"$1"/holders/*; do
+        [ -e "$H" ] || continue
+
+        HN=$(cat "$H/dm/name" 2>/dev/null)
+
+        case "$HN" in
+            rescue_*) continue ;;
+        esac
+
+        echo "${H##*/}"
+    done
+}
+
+# ---------------------------------------------------------------
+# Source protection
+# ---------------------------------------------------------------
+
+pd_fail() {
+    PD_ERR=$1
+    log "FAIL protect ${PD_IN:-unknown}: $PD_ERR"
+
+    if [ -n "$PD_TMP" ]; then
+        rm -f "$PD_TMP" 2>/dev/null
+    fi
+}
+
+protect_source_device() {
+    PD_IN=$1
+    PD_ERR=""
+    PD_TMP="/tmp/rescue_pd.$$"
+
+    command -v blockdev >/dev/null 2>&1 || {
+        pd_fail "ไม่พบคำสั่ง blockdev"
+        return 1
+    }
+
+    [ -b "$PD_IN" ] || {
+        pd_fail "ไม่พบ block device: $PD_IN"
+        return 1
+    }
+
+    # Only accept a whole disk or a partition on a whole disk.
+    PD_PARENT=$(lsblk -dn -o PKNAME "$PD_IN" 2>/dev/null |
+        tr -d '[:space:]')
+
+    if [ -n "$PD_PARENT" ]; then
+        PD_DISK="/dev/$PD_PARENT"
+    else
+        PD_DISK=$PD_IN
+    fi
+
+    [ -b "$PD_DISK" ] || {
+        pd_fail "ไม่พบดิสก์แม่: $PD_DISK"
+        return 1
+    }
+
+    PD_TYPE=$(lsblk -dn -o TYPE "$PD_DISK" 2>/dev/null |
+        tr -d '[:space:]')
+
+    case " $PROTECT_TYPES " in
+        *" $PD_TYPE "*) ;;
+        *)
+            pd_fail "ชนิดอุปกรณ์ไม่รองรับ: $PD_TYPE"
+            return 1
+            ;;
+    esac
+
+    PD_DISK_NAME=${PD_DISK##*/}
+
+    # Best-effort exclusion of Rescue-OS boot/persistence disk.
+    if get_sys_disks | grep -qx "$PD_DISK_NAME"; then
+        pd_fail "อุปกรณ์นี้อาจเป็นดิสก์ระบบหรือ persistence"
+        return 1
+    fi
+
+    # Include whole disk and its direct partitions.
+    PD_PARTS=$(lsblk -ln -o NAME,TYPE "$PD_DISK" 2>/dev/null |
+        awk '$2=="part" {print $1}')
+
+    PD_DEVS="$PD_DISK"
+    for PD_P in $PD_PARTS; do
+        PD_DEVS="$PD_DEVS /dev/$PD_P"
+    done
+
+    # Refuse devices used as swap or held by another block layer.
+    for PD_D in $PD_DEVS; do
+        PD_NAME=${PD_D##*/}
+
+        if dev_in_swap "$PD_D"; then
+            pd_fail "$PD_D ถูกใช้เป็น swap"
+            return 1
+        fi
+
+        PD_H=$(dev_foreign_holders "$PD_NAME" | tr '\n' ' ')
+        if [ -n "$PD_H" ]; then
+            pd_fail "$PD_D มี holder อื่น: $PD_H"
+            return 1
+        fi
+    done
+
+    # Inspect existing mounts before changing device state.
+    awk '$1 ~ /^\/dev\// {print $1, $2, $4}' \
+        /proc/mounts > "$PD_TMP" || {
+        pd_fail "อ่านรายการ mount ไม่สำเร็จ"
+        return 1
+    }
+
+    while read -r PD_SRC PD_MP PD_OPTS; do
+        [ -n "$PD_SRC" ] || continue
+
+        PD_MATCH=0
+        for PD_D in $PD_DEVS; do
+            if same_dev "$PD_SRC" "$PD_D"; then
+                PD_MATCH=1
+                break
+            fi
+        done
+
+        [ "$PD_MATCH" -eq 1 ] || continue
+
+        # Decode common mount-path escapes from /proc/mounts.
+        PD_MP=$(printf '%s' "$PD_MP" |
+            sed 's/\\040/ /g; s/\\011/	/g; s/\\134/\\/g')
+
+        case ",$PD_OPTS," in
+            *,ro,*) continue ;;
+        esac
+
+        # Never automatically unmount a writable mount in a critical path.
+        case "$PD_MP" in
+            /|/boot|/boot/*|/usr|/usr/*|/etc|/etc/*|\
+            /var|/var/*|/root|/root/*|/home|/home/*)
+                pd_fail "$PD_SRC ถูกเมาท์แบบเขียนได้ที่ $PD_MP"
+                return 1
+                ;;
+        esac
+
+        # Writable non-critical mount: unmount or fail closed.
+        if ! umount "$PD_MP" >> "$LOG" 2>&1; then
+            pd_fail "ปลด mount ไม่สำเร็จ: $PD_MP"
+            return 1
+        fi
+
+        log "protect: unmounted $PD_MP"
+    done < "$PD_TMP"
+
+    rm -f "$PD_TMP"
+    PD_TMP=""
+
+    # Set RO on the whole disk and every direct partition.
+    for PD_D in $PD_DEVS; do
+        if ! blockdev --setro "$PD_D" >> "$LOG" 2>&1; then
+            pd_fail "ตั้ง RO ไม่สำเร็จ: $PD_D"
+            return 1
+        fi
+    done
+
+    # Verify every device. Never continue if any verification fails.
+    for PD_D in $PD_DEVS; do
+        if ! dev_is_ro "$PD_D"; then
+            pd_fail "ยืนยัน RO ไม่สำเร็จ: $PD_D"
+            return 1
+        fi
+    done
+
+    log "OK source protected: $PD_DISK"
+    return 0
+}
+
+# ---------------------------------------------------------------
+# Filesystem mounting
+# No generic mount fallback.
+# ---------------------------------------------------------------
+
+mount_ro() {
+    MR_SRC=$1
+    MR_DEST=$2
+    MR_FS=$3
+
+    mkdir -p "$MR_DEST" || return 1
+
+    case "$MR_FS" in
+        ntfs)
+            command -v ntfs-3g >/dev/null 2>&1 || return 1
+
+            ntfs-3g -o "$RO_OPTS,norecover" \
+                "$MR_SRC" "$MR_DEST" >> "$LOG" 2>&1
+            ;;
+        ext4)
+            mount -t ext4 -o "$RO_OPTS,noload" \
+                "$MR_SRC" "$MR_DEST" >> "$LOG" 2>&1
+            ;;
+        *)
+            log "REFUSE mount: no handler for $MR_FS"
+            return 1
+            ;;
+    esac
+}
+
+detect_role() {
+    DR_PATH=$1
+
+    if [ -d "$DR_PATH/Windows/System32" ] ||
+       { [ -d "$DR_PATH/Windows" ] &&
+         [ -d "$DR_PATH/Users" ]; }; then
+        echo "Windows"
+    elif [ -d "$DR_PATH/EFI" ] || [ -d "$DR_PATH/Boot" ]; then
+        echo "System / Boot"
+    elif [ -d "$DR_PATH/etc" ] && [ -d "$DR_PATH/usr" ]; then
+        echo "Linux Root"
+    elif [ -d "$DR_PATH/Users" ] ||
+         [ -d "$DR_PATH/Documents and Settings" ]; then
+        echo "Users"
+    else
+        echo "Data / Unknown"
+    fi
+}
+
+# ---------------------------------------------------------------
+# Partition selection
+# List metadata only. No probing or mounting at this stage.
+# ---------------------------------------------------------------
+
+select_partition() {
+    SYS_DISKS=$(get_sys_disks)
+    set --
+
+    while read -r PART TYPE FSTYPE; do
+        [ -n "$PART" ] || continue
+        [ "$TYPE" = "part" ] || continue
+        [ -b "/dev/$PART" ] || continue
+
+        is_sys_part "$PART" && continue
+
+        case "$FSTYPE" in
+            ntfs|ext4|crypto_LUKS|BitLocker|vfat|exfat|\
+            ext2|ext3|xfs|btrfs)
+                ;;
+            *)
+                continue
+                ;;
+        esac
+
+        SIZE=$(lsblk -dn -o SIZE "/dev/$PART" 2>/dev/null |
+            tr -d '[:space:]')
+
+        LABEL=$(lsblk -dn -o LABEL "/dev/$PART" 2>/dev/null)
+        [ -n "$LABEL" ] || LABEL="[ไม่มีชื่อ]"
+
+        case "$FSTYPE" in
+            ntfs|ext4)
+                STATUS="เลือกเพื่อป้องกันและตรวจสอบ"
+                ;;
+            crypto_LUKS|BitLocker)
+                STATUS="เข้ารหัส — ต้องปลดล็อก"
+                ;;
+            *)
+                STATUS="ยังไม่มี mount handler ที่ทดสอบแล้ว"
+                ;;
+        esac
+
+        set -- "$@" "$PART" "$SIZE" "$FSTYPE" "$STATUS" "$LABEL"
+    done <<EOF
+$(lsblk -ln -o NAME,TYPE,FSTYPE 2>/dev/null)
+EOF
+
+    [ "$#" -gt 0 ] || return 2
+
+    zenity --list --print-column=1 \
+        --title="Rescue-OS : เลือกต้นทาง" \
+        --text="เลือกพาร์ทิชันต้นทาง ระบบจะป้องกันการเขียนก่อน mount" \
+        --width=860 --height=440 \
+        --column="พาร์ทิชัน" \
+        --column="ขนาด" \
+        --column="Filesystem" \
+        --column="สถานะ" \
+        --column="LABEL" \
+        "$@"
+}
+
+# ---------------------------------------------------------------
+# Encrypted mapper validation
+# ---------------------------------------------------------------
+
+mapper_backs() {
+    command -v cryptsetup >/dev/null 2>&1 || return 1
+
+    MB_DEV=$(cryptsetup status "$1" 2>/dev/null |
+        awk '$1=="device:" {print $2; exit}')
+
+    [ -n "$MB_DEV" ] && same_dev "$MB_DEV" "$2"
+}
+
+unlock_encrypted() {
+    UE_PART=$1
+    UE_FS=$2
+    UE_NAME="rescue_${UE_PART}"
+
+    command -v cryptsetup >/dev/null 2>&1 || {
+        show_error "ไม่พบ cryptsetup" \
+            "ต้องติดตั้ง cryptsetup เพื่อปลดล็อก filesystem นี้"
+        return 1
+    }
+
+    case "$UE_FS" in
+        crypto_LUKS)
+            UE_TYPE=luks
+            UE_PROMPT="รหัสผ่าน LUKS"
+            ;;
+        BitLocker)
+            UE_TYPE=bitlk
+            UE_PROMPT="รหัสผ่านหรือ Recovery Key ของ BitLocker"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    modprobe dm-crypt 2>/dev/null
+
+    if cryptsetup status "$UE_NAME" >/dev/null 2>&1; then
+        if ! mapper_backs "$UE_NAME" "/dev/$UE_PART"; then
+            show_error "mapper ไม่ตรงกัน" \
+                "mapper $UE_NAME ไม่ได้อ้างถึง /dev/$UE_PART กรุณา Safe Eject ก่อน"
+            return 1
+        fi
+    else
+        UE_TRY=1
+        UE_OK=0
+
+        while [ "$UE_TRY" -le 3 ]; do
+            UE_SECRET=$(zenity --password \
+                --title="$UE_PROMPT ($UE_TRY/3)")
+
+            [ $? -eq 0 ] || {
+                UE_SECRET=""
+                return 1
+            }
+
+            if printf '%s' "$UE_SECRET" |
+                cryptsetup open --readonly --type "$UE_TYPE" \
+                    --key-file=- "/dev/$UE_PART" "$UE_NAME" \
+                    >> "$LOG" 2>&1; then
+                UE_OK=1
+                break
+            fi
+
+            log "FAIL cryptsetup open: /dev/$UE_PART"
+
+            zenity --error --title="ปลดล็อกไม่สำเร็จ" \
+                --text="รหัสไม่ถูกต้อง หรือไม่สามารถปลดล็อกอุปกรณ์ได้"
+
+            UE_TRY=$((UE_TRY + 1))
+        done
+
+        UE_SECRET=""
+        [ "$UE_OK" -eq 1 ] || return 1
+    fi
+
+    UE_SRC="$MAPPER_DIR/$UE_NAME"
+
+    [ -b "$UE_SRC" ] || {
+        log "FAIL mapper missing: $UE_SRC"
+        return 1
+    }
+
+    mapper_backs "$UE_NAME" "/dev/$UE_PART" || return 1
+
+    # Do not trust a mapper merely because its name starts with rescue_.
+    dev_is_ro "$UE_SRC" || {
+        show_error "mapper ไม่ใช่ Read-Only" \
+            "ยืนยัน RO ของ $UE_SRC ไม่ได้ กรุณา Safe Eject แล้วลองใหม่"
+        return 1
+    }
+
+    UE_INNER_FS=$(get_fstype "$UE_SRC")
+    [ -n "$UE_INNER_FS" ] || {
+        show_error "ไม่พบ filesystem" \
+            "ปลดล็อกได้ แต่ตรวจไม่พบ filesystem ภายใน"
+        return 1
+    }
+
+    UNLOCK_SRC=$UE_SRC
+    UNLOCK_FS=$UE_INNER_FS
+
+    log "OK encrypted mapper RO: $UE_SRC"
+    return 0
+}
+
+# ---------------------------------------------------------------
+# Safe mount
+# ---------------------------------------------------------------
+
+safe_mount() {
+    SM_PART=$1
+    SM_DEV="/dev/$SM_PART"
+    SM_FS=$(get_fstype "$SM_DEV")
+    SM_MOUNT="$MNT_BASE/rescue_$SM_PART"
+    SM_SRC=$SM_DEV
+    SM_SRC_FS=$SM_FS
+
+    [ -b "$SM_DEV" ] || {
+        show_error "ไม่พบอุปกรณ์" "$SM_DEV ไม่มีอยู่"
+        return 1
+    }
+
+    # Only tested filesystem handlers are enabled in this version.
+    case "$SM_FS" in
+        ntfs|ext4|crypto_LUKS)
+            ;;
+        BitLocker)
+            show_error "ยังไม่เปิดใช้งาน BitLocker" \
+                "การตรวจพบ BitLocker ขึ้นกับเวอร์ชันและการตั้งค่าของเครื่องมือ จึงยังไม่เปิดใช้งานใน build นี้"
+            return 1
+            ;;
+        *)
+            show_error "ยังไม่มี mount handler" \
+                "Filesystem '$SM_FS' ยังไม่มี handler ที่เปิดใช้งานใน Rescue-OS รุ่นนี้"
+            return 1
+            ;;
+    esac
+
+    # Protect source before probing or mounting.
+    if ! protect_source_device "$SM_DEV"; then
+        show_error "ป้องกันการเขียนไม่ได้" \
+            "ยกเลิกการ mount:\n$PD_ERR\n\nดูรายละเอียดได้ที่ $LOG"
+        return 1
+    fi
+
+    case "$SM_FS" in
+        crypto_LUKS)
+            unlock_encrypted "$SM_PART" "$SM_FS" || return 1
+            SM_SRC=$UNLOCK_SRC
+            SM_SRC_FS=$UNLOCK_FS
+
+            if ! fs_is_tested "$SM_SRC_FS"; then
+                show_error "Filesystem ภายในยังไม่รองรับ" \
+                    "พบ '$SM_SRC_FS' ภายใน container แต่ยังไม่มี handler ที่ทดสอบแล้ว"
+                return 1
+            fi
+            ;;
+    esac
+
+    # Refuse to reuse a busy destination mount point.
+    if mountpoint -q "$SM_MOUNT" 2>/dev/null; then
+        SM_CUR_SRC=$(get_mount_source "$SM_MOUNT")
+
+        if is_ro_mount "$SM_MOUNT" &&
+           same_dev "$SM_CUR_SRC" "$SM_SRC"; then
+            thunar "$SM_MOUNT" &
+            return 0
+        fi
+
+        show_error "Mount point ถูกใช้งาน" \
+            "$SM_MOUNT มี mount เดิมหรือยืนยันความปลอดภัยไม่ได้ กรุณา Safe Eject ก่อน"
+        return 1
+    fi
+
+    # Do not inspect through another writable mount of this source.
+    SM_EXISTING=$(get_mountpoint "$SM_DEV")
+
+    if [ -n "$SM_EXISTING" ]; then
+        if is_ro_mount "$SM_EXISTING"; then
+            thunar "$SM_EXISTING" &
+            return 0
+        fi
+
+        show_error "ดิสก์ถูกเมาท์แบบเขียนได้" \
+            "$SM_DEV ยังถูกเมาท์แบบเขียนได้ที่ $SM_EXISTING กรุณาปลด mount ด้วยตนเองแล้วลองใหม่"
+        return 1
+    fi
+
+    mkdir -p "$SM_MOUNT" || return 1
+
+    if ! mount_ro "$SM_SRC" "$SM_MOUNT" "$SM_SRC_FS"; then
+        rmdir "$SM_MOUNT" 2>/dev/null
+        log "FAIL mount: $SM_SRC"
+        show_error "เมาท์ไม่สำเร็จ" \
+            "ไม่สามารถเมาท์ $SM_DEV แบบ Read-Only ได้ ระบบจะไม่ซ่อมต้นฉบับอัตโนมัติ"
+        return 1
+    fi
+
+    # Verify mount options and actual source after mounting.
+    SM_OPTS=$(get_mount_opts "$SM_MOUNT")
+    SM_CUR_SRC=$(get_mount_source "$SM_MOUNT")
+
+    if [ -z "$SM_OPTS" ] ||
+       ! is_ro_mount "$SM_MOUNT" ||
+       ! same_dev "$SM_CUR_SRC" "$SM_SRC"; then
+
+        log "FAIL mount verification: $SM_SRC -> $SM_MOUNT"
+
+        if ! umount "$SM_MOUNT" >> "$LOG" 2>&1; then
+            log "CRITICAL: failed to unmount unverified mount $SM_MOUNT"
+            show_error "ยกเลิกไม่สมบูรณ์" \
+                "การตรวจ mount ไม่ผ่าน และปลด mount ไม่สำเร็จ ห้ามถอดดิสก์ ดู $LOG"
+            return 1
+        fi
+
+        show_error "ตรวจสอบ Mount ไม่ผ่าน" \
+            "ยืนยันต้นทางหรือสถานะ Read-Only ไม่ได้ จึงยกเลิก"
+        return 1
+    fi
+
+    log "OK mount RO: $SM_SRC at $SM_MOUNT"
+
+    zenity --info --title="Rescue-OS" \
+        --width=420 \
+        --text="เมาท์แบบ Read-Only แล้ว\n$SM_DEV\n\nกำลังเปิดตัวจัดการไฟล์"
+
+    thunar "$SM_MOUNT" &
+}
+
+# ---------------------------------------------------------------
+# Safe Eject
+# ---------------------------------------------------------------
+
+safe_eject() {
+    SE_FAILED=""
+    SE_DONE=0
+
+    for SE_M in "$MNT_BASE"/rescue_*; do
+        [ -d "$SE_M" ] || continue
+
+        if mountpoint -q "$SE_M" 2>/dev/null; then
+            if umount "$SE_M" >> "$LOG" 2>&1; then
+                log "umount $SE_M"
+                SE_DONE=$((SE_DONE + 1))
+            else
+                SE_FAILED="${SE_FAILED}\n$SE_M"
+                continue
+            fi
+        fi
+
+        rmdir "$SE_M" 2>/dev/null
+    done
+
+    # Do not close any mapper that remains mounted anywhere.
+    if command -v cryptsetup >/dev/null 2>&1; then
+        for SE_N in "$MAPPER_DIR"/rescue_*; do
+            [ -b "$SE_N" ] || continue
+
+            SE_NAME=${SE_N##*/}
+
+            cryptsetup status "$SE_NAME" >/dev/null 2>&1 || continue
+
+            SE_MOUNTED=0
+            while read -r SE_SRC SE_MP SE_REST; do
+                if same_dev "$SE_SRC" "$SE_N"; then
+                    SE_MOUNTED=1
+                    break
+                fi
+            done < /proc/mounts
+
+            if [ "$SE_MOUNTED" -eq 1 ]; then
+                SE_FAILED="${SE_FAILED}\n$SE_N (ยังมี mount อยู่)"
+                continue
+            fi
+
+            if [ -n "$SE_FAILED" ]; then
+                continue
+            fi
+
+            if cryptsetup close "$SE_NAME" >> "$LOG" 2>&1; then
+                log "cryptsetup close $SE_NAME"
+                SE_DONE=$((SE_DONE + 1))
+            else
+                SE_FAILED="${SE_FAILED}\n$SE_N"
+            fi
+        done
+    fi
+
+    if [ -n "$SE_FAILED" ]; then
+        zenity --warning --title="ถอดไม่สำเร็จ" \
+            --width=480 \
+            --text="ยังถอดรายการเหล่านี้ไม่ได้:$SE_FAILED\n\nปิดโปรแกรมที่ใช้งานไดรฟ์แล้วลองใหม่"
+        return 1
+    fi
+
+    if [ "$SE_DONE" -eq 0 ]; then
+        zenity --info --title="Safe Eject" \
+            --text="ไม่มีรายการที่ต้องถอด"
+    else
+        zenity --info --title="Safe Eject" \
+            --text="ถอด mount/mapper ที่จัดการได้แล้ว\nสถานะ block-device RO จะคงอยู่จนกว่าจะถอดอุปกรณ์หรือรีบูต"
+    fi
+}
+
+# ---------------------------------------------------------------
+# Main menu
+# ---------------------------------------------------------------
+
+while true; do
+    CHOICE=$(zenity --list \
+        --title="Rescue-OS" \
+        --text="เลือกสิ่งที่ต้องการดำเนินการ" \
+        --column="รหัส" --column="รายการ" \
+        "1" "กู้ไฟล์แบบ Read-Only" \
+        "2" "ตรวจ S.M.A.R.T. ของดิสก์" \
+        "3" "สแกนไวรัส (ยังไม่พร้อมใช้งาน)" \
+        "4" "ออกจากเมนู" \
+        "5" "ปิดเครื่อง" \
+        "6" "Safe Eject" \
+        --width=560 --height=350 \
+        --cancel-label="ออก")
+
+    case "$CHOICE" in
+        1)
+            SELECTED_PART=$(select_partition)
+            RC=$?
+
+            if [ "$RC" -eq 2 ]; then
+                zenity --warning --title="ไม่พบพาร์ทิชัน" \
+                    --text="ไม่พบพาร์ทิชันที่ระบบรู้จัก"
+            elif [ "$RC" -eq 0 ] && [ -n "$SELECTED_PART" ]; then
+                safe_mount "$SELECTED_PART"
+            fi
+            ;;
+        2)
+            TARGET=$(get_sys_disks)
+            SMART_TARGET=""
+
+            for SD in $(lsblk -d -n -o NAME,TYPE); do
+                # This loop is intentionally not used for selection:
+                # get a safe candidate explicitly below.
+                :
+            done
+
+            # SMART target selection is kept separate from source protection.
+            SMART_TARGET=$(zenity --list \
+                --title="เลือกดิสก์สำหรับ SMART" \
+                --text="เลือกดิสก์ที่จะตรวจสุขภาพ" \
+                --column="อุปกรณ์" --column="ขนาด" \
+                $(lsblk -d -n -o NAME,TYPE,SIZE |
+                    awk '$2=="disk" {print "/dev/"$1, $3}') \
+                --width=500 --height=350)
+
+            if [ -n "$SMART_TARGET" ] && [ -b "$SMART_TARGET" ]; then
+                HEALTH=$(smartctl -H "$SMART_TARGET" 2>&1)
+                printf '%s\n' "$HEALTH" | zenity --text-info \
+                    --title="S.M.A.R.T. ($SMART_TARGET)" \
+                    --width=600 --height=400
+            fi
+            ;;
+        3)
+            zenity --info --title="Antivirus" \
+                --text="ฟังก์ชันสแกนไวรัสยังไม่พร้อมใช้งาน"
+            ;;
+        4|"")
+            break
+            ;;
+        5)
+            poweroff
+            break
+            ;;
+        6)
+            safe_eject
+            ;;
+    esac
+done

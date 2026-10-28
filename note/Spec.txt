@@ -1,0 +1,9 @@
+5. สรุปเทคโนโลยีที่เลือก
+ส่วน	ตัวเลือกเบื้องต้น
+Base OS	Alpine Linux
+Boot	UEFI + Legacy BIOS
+UI	GTK + Python
+Backend	Bash เดิม ผ่าน Adapter
+Safety	ตรวจอุปกรณ์และควบคุมการเขียนแยกจาก UI
+Fallback	CLI
+เป้าหมายรุ่นแรก	x86-64 PC / Notebook

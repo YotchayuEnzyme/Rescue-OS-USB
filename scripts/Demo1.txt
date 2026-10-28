@@ -1,0 +1,205 @@
+#!/bin/ash
+# Rescue-OS : Core Script (Clean MVP Version)
+
+MNT_BASE="/mnt"
+LOG="/tmp/rescue.log"
+mkdir -p "$MNT_BASE"
+
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+msg_err() { zenity --error --title="Rescue-OS" --width=420 --text="$1"; }
+msg_info() { zenity --info --title="Rescue-OS" --width=420 --text="$1"; }
+
+# ---------------------------------------------------------
+# 1. ฟังก์ชันเลือกพาร์ทิชัน และ เมาท์แบบ Read-Only
+# ---------------------------------------------------------
+select_part() {
+    TITLE=$1
+    # ดึงรายการพาร์ทิชันทั้งหมด (ข้าม loop/ram/sr0)
+    LIST=$(lsblk -ln -o NAME,SIZE,FSTYPE,LABEL,TYPE | awk '$5=="part" && $3!="" {
+        lbl = ($4=="" ? "-" : $4);
+        print $1, $2, $3, lbl
+    }')
+
+    [ -z "$LIST" ] && { msg_err "ไม่พบพาร์ทิชันในระบบ"; return 1; }
+
+    zenity --list --title="$TITLE" --width=650 --height=360 \
+        --print-column=1 \
+        --column="พาร์ทิชัน" --column="ขนาด" --column="ชนิด (FS)" --column="ชื่อกำกับ (Label)" \
+        $LIST
+}
+
+mount_source_ro() {
+    PART=$1
+    DEV="/dev/$PART"
+    FS=$(lsblk -dn -o FSTYPE "$DEV" | tr -d '[:space:]')
+    SRC_MNT="$MNT_BASE/rescue_src_$PART"
+
+    # ล็อก Read-Only ระดับ Kernel
+    blockdev --setro "$DEV" 2>/dev/null
+
+    # ถ้าเป็นไดรฟ์เข้ารหัส ให้ถามรหัสผ่านแล้วเปิดแบบ Read-Only
+    if [ "$FS" = "crypto_LUKS" ] || [ "$FS" = "BitLocker" ]; then
+        PASS=$(zenity --password --title="ใส่รหัสผ่านเพื่อปลดล็อก $PART ($FS)")
+        [ -z "$PASS" ] && return 1
+
+        TYPE="luks"
+        [ "$FS" = "BitLocker" ] && TYPE="bitlk"
+
+        if [ ! -e "/dev/mapper/rescue_$PART" ]; then
+            printf '%s' "$PASS" | cryptsetup open --readonly --type "$TYPE" --key-file=- "$DEV" "rescue_$PART" || {
+                msg_err "ปลดล็อกไม่สำเร็จ รหัสผ่านอาจไม่ถูกต้อง"
+                return 1
+            }
+        fi
+        DEV="/dev/mapper/rescue_$PART"
+        FS=$(lsblk -dn -o FSTYPE "$DEV" | tr -d '[:space:]')
+    fi
+
+    mkdir -p "$SRC_MNT"
+    if ! mountpoint -q "$SRC_MNT"; then
+        if [ "$FS" = "ntfs" ]; then
+            ntfs-3g -o ro,norecover "$DEV" "$SRC_MNT" 2>>"$LOG"
+        else
+            mount -o ro "$DEV" "$SRC_MNT" 2>>"$LOG"
+        fi
+    fi
+
+    if ! mountpoint -q "$SRC_MNT"; then
+        msg_err "ไม่สามารถเมาท์ $PART แบบ Read-Only ได้"
+        return 1
+    fi
+
+    echo "$SRC_MNT"
+}
+
+# ---------------------------------------------------------
+# 2. ฟังก์ชันกู้ข้อมูล (1-Click Backup หรือ เปิดดูไฟล์เอง)
+# ---------------------------------------------------------
+do_recovery() {
+    SRC_PART=$(select_part "เลือกพาร์ทิชันต้นทางที่ต้องการกู้ข้อมูล")
+    [ -z "$SRC_PART" ] && return
+
+    SRC_MNT=$(mount_source_ro "$SRC_PART")
+    [ -z "$SRC_MNT" ] && return
+
+    MODE=$(zenity --list --title="เลือกวิธีกู้ข้อมูล ($SRC_PART)" --width=520 --height=260 \
+        --column="รหัส" --column="การทำงาน" \
+        "1" "กู้ไฟล์อัตโนมัติ (1-Click Backup ลงแฟลชไดรฟ์)" \
+        "2" "เปิดดูและเลือกก๊อปปี้ไฟล์เอง (Thunar)")
+
+    if [ "$MODE" = "2" ]; then
+        thunar "$SRC_MNT" &
+    elif [ "$MODE" = "1" ]; then
+        DST_PART=$(select_part "เลือกแฟลชไดรฟ์ปลายทาง (สำหรับเซฟไฟล์)")
+        [ -z "$DST_PART" ] && return
+
+        if [ "$DST_PART" = "$SRC_PART" ]; then
+            msg_err "ห้ามเลือกไดรฟ์ปลายทางซ้ำกับต้นทาง!"
+            return
+        fi
+
+        DST_MNT="$MNT_BASE/rescue_dst_$DST_PART"
+        mkdir -p "$DST_MNT"
+        mountpoint -q "$DST_MNT" || mount -o rw "/dev/$DST_PART" "$DST_MNT" 2>>"$LOG"
+
+        if ! mountpoint -q "$DST_MNT"; then
+            msg_err "เมาท์ไดรฟ์ปลายทาง /dev/$DST_PART ไม่สำเร็จ"
+            return
+        fi
+
+        DEST_DIR="$DST_MNT/RescueBackup_${SRC_PART}_$(date '+%Y%m%d_%H%M')"
+        mkdir -p "$DEST_DIR"
+
+        (
+            echo "20"; echo "# กำลังคัดลอกไฟล์สำคัญ..."
+            if [ -d "$SRC_MNT/Users" ]; then
+                cp -r "$SRC_MNT/Users" "$DEST_DIR/" 2>>"$LOG"
+            elif [ -d "$SRC_MNT/home" ]; then
+                cp -r "$SRC_MNT/home" "$DEST_DIR/" 2>>"$LOG"
+            else
+                cp -r "$SRC_MNT"/* "$DEST_DIR/" 2>>"$LOG"
+            fi
+            echo "85"; echo "# กำลังซิงก์ข้อมูลลงแฟลชไดรฟ์ (Sync)..."
+            sync
+            echo "100"; echo "# เสร็จสิ้น!"
+        ) | zenity --progress --title="กำลังสำรองข้อมูล" --auto-close --width=420
+
+        msg_info "กู้ข้อมูลเสร็จสิ้น!\nบันทึกไว้ที่: $DEST_DIR"
+        thunar "$DEST_DIR" &
+    fi
+}
+
+# ---------------------------------------------------------
+# 3. ฟังก์ชันตรวจ S.M.A.R.T.
+# ---------------------------------------------------------
+do_smart() {
+    DISK=$(lsblk -dn -o NAME,SIZE,MODEL,TYPE | awk '$4=="disk" {print "/dev/"$1, $2, ($3==""?"Disk":$3)}' | \
+        zenity --list --title="เลือกดิสก์เพื่อตรวจ S.M.A.R.T." --width=500 --height=300 \
+        --print-column=1 --column="อุปกรณ์" --column="ขนาด" --column="รุ่น")
+
+    [ -z "$DISK" ] && return
+    smartctl -H -A "$DISK" 2>&1 | zenity --text-info --title="ผลตรวจ S.M.A.R.T. ($DISK)" --width=680 --height=450
+}
+
+# ---------------------------------------------------------
+# 4. ฟังก์ชันสแกนไวรัส (ClamAV)
+# ---------------------------------------------------------
+do_antivirus() {
+    if ! command -v clamscan >/dev/null 2>&1; then
+        msg_err "ยังไม่ได้ติดตั้ง ClamAV ในระบบ (สั่ง apk add clamav เพื่อใช้งาน)"
+        return
+    fi
+
+    SCAN_PART=$(select_part "เลือกพาร์ทิชันที่ต้องการสแกนไวรัส")
+    [ -z "$SCAN_PART" ] && return
+
+    SCAN_MNT=$(mount_source_ro "$SCAN_PART")
+    [ -z "$SCAN_MNT" ] && return
+
+    REPORT="/tmp/clamscan_$SCAN_PART.txt"
+    (
+        echo "30"; echo "# กำลังสแกนไวรัสใน $SCAN_PART (อาจใช้เวลาสักครู่)..."
+        clamscan -r --infected "$SCAN_MNT" > "$REPORT" 2>&1
+        echo "100"; echo "# สแกนเสร็จสิ้น"
+    ) | zenity --progress --title="Antivirus Scan" --pulsate --auto-close --width=420
+
+    zenity --text-info --title="ผลการสแกนไวรัส ($SCAN_PART)" --filename="$REPORT" --width=650 --height=420
+}
+
+# ---------------------------------------------------------
+# 5. ฟังก์ชันถอดไดรฟ์ปลอดภัย (Safe Eject)
+# ---------------------------------------------------------
+do_eject() {
+    sync
+    for M in "$MNT_BASE"/rescue_*; do
+        [ -d "$M" ] && umount "$M" 2>/dev/null && rmdir "$M" 2>/dev/null
+    done
+    for C in /dev/mapper/rescue_*; do
+        [ -e "$C" ] && cryptsetup close "${C##*/}" 2>/dev/null
+    done
+    msg_info "ถอดเมาท์และล็อกไดรฟ์ทั้งหมดเรียบร้อยแล้ว ถอดสาย USB ได้อย่างปลอดภัย"
+}
+
+# ---------------------------------------------------------
+# เมนูหลัก (Main Loop)
+# ---------------------------------------------------------
+while true; do
+    CHOICE=$(zenity --list --title="Rescue-OS" --width=540 --height=340 \
+        --text="เลือกรายการที่ต้องการดำเนินการ" \
+        --column="รหัส" --column="ฟังก์ชันการทำงาน" \
+        "1" "กู้ไฟล์แบบ Read-Only (1-Click / เปิดดูไฟล์)" \
+        "2" "ตรวจสุขภาพดิสก์ (S.M.A.R.T.)" \
+        "3" "สแกนไวรัส (ClamAV)" \
+        "4" "Safe Eject (ถอดไดรฟ์ทั้งหมดอย่างปลอดภัย)" \
+        "5" "ออกจากโปรแกรม" \
+        "6" "ปิดเครื่อง (Power Off)")
+
+    case "$CHOICE" in
+        1) do_recovery ;;
+        2) do_smart ;;
+        3) do_antivirus ;;
+        4) do_eject ;;
+        5|"") break ;;
+        6) poweroff; break ;;
+    esac
+done
